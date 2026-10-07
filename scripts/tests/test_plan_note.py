@@ -72,6 +72,50 @@ def test_plan_writes_usable_config(tmp: Path) -> None:
     assert "AUDIT_NO_CONFIG" not in {f.code for f in lit_cli.check_audit(root).findings}
 
 
+# ───────────── 定位修正：这是通用研究规范，不是学位论文专用 ─────────────
+
+def test_plan_error_is_not_thesis_bound(tmp: Path) -> None:
+    """★ 报错**不许**假定"学位论文 / 学校 / 学历层级"。
+
+    容量可来自外部规范，**也可以由使用者自己承诺**。
+    曾经报错里写死"查你所在学校的规范原文。例：南理工硕士 ≥40、博士 ≥80"。
+    """
+    res = lit_cli.plan_course(bare(tmp / "c"))
+    joined = " ".join(res["problems"])
+    for banned in ("南理工", "所在学校", "本科", "硕士", "博士"):
+        assert banned not in joined, f"报错里不该出现「{banned}」：{joined}"
+    assert "外部规范" in joined and "你自己承诺" in joined, joined
+
+
+def test_plan_records_capacity_source(tmp: Path) -> None:
+    """`capacity.source` 记下"这个数从哪来" —— 检查的是承诺 vs 兑现。"""
+    root = bare(tmp / "c")
+    res = lit_cli.plan_course(root, refs_min=40, now_year=2026,
+                             capacity_source="自定义（预研摸底）")
+    assert res["ok"] and res["written"]
+    cfg = json.loads((root / "lit.config.json").read_text(encoding="utf-8"))
+    assert cfg["capacity"]["source"] == "自定义（预研摸底）"
+
+
+def test_refs_style_other_than_gb7714_is_refused(tmp: Path) -> None:
+    """★ 选了非 gb7714 的风格 → **明确说"我没做"**，绝不假装支持。"""
+    import argparse
+    root = bare(tmp / "c")
+    (root / "02_候选库" / "refs.json").write_text("[]", encoding="utf-8")
+    (root / "lit.config.json").write_text(
+        json.dumps({"refs_style": "apa", "capacity": {"refs_min": 1}}, ensure_ascii=False),
+        encoding="utf-8")
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = lit_cli.cmd_refs(argparse.Namespace(dir=str(root), scan=None, order="id",
+                                                 write=False, json=False))
+    out = buf.getvalue()
+    assert rc == 2, "非 gb7714 必须返回非零，而不是照样输出国标"
+    assert "只实现了 gb7714" in out, out
+
+
 def test_plan_keeps_existing_keys(tmp: Path) -> None:
     root = bare(tmp / "c")
     (root / "lit.config.json").write_text(

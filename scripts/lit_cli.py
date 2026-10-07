@@ -734,15 +734,18 @@ def check_capacity(root: Path, config: Dict[str, Any], refs: List[Dict[str, Any]
     """S-02：著录篇数与比例必须达标（硬线在 `lit.config.json`，不写死在代码里）。"""
     out: List[Finding] = []
     cap = _capacity_cfg(config)
+    src = str(cap.get("source") or "").strip()
+    src_hint = f"（出处：{src}）" if src else "（未写 capacity.source——建议记下这个数从哪来，S-02 §1.3）"
     need = cap.get("refs_min")
     if isinstance(need, int) and len(refs) < need:
         out.append(
             Finding(
                 "AUDIT_CAPACITY_SHORT",
                 "error",
-                f"著录 {len(refs)} 条 < 硬线 {need} 条",
+                f"著录 {len(refs)} 条 < 你承诺的 {need} 条{src_hint}",
                 loc="02_候选库/refs.json",
-                fix=f"继续检索/取全文到 ≥{need} 条（S-02；硬线在 lit.config.json 的 capacity.refs_min）",
+                fix=f"补到 ≥{need} 条，或**显式把承诺改小并写明理由**（S-02）——"
+                "检查的是「承诺 vs 兑现」，不是「你违抗了谁」",
             )
         )
     # 近五年 / 外文比例
@@ -1401,20 +1404,27 @@ def plan_course(
     recent_ratio: Optional[float] = None,
     foreign_ratio: Optional[float] = None,
     sources: Optional[Sequence[str]] = None,
+    capacity_source: Optional[str] = None,
+    refs_style: Optional[str] = None,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """生成/更新课题目录的 `lit.config.json`（容量与比例部分）。
 
     ★ **刻意不内置任何具体数字**：S-02 §1.2 明文要求"规范条文里不写具体数字"，
-    因为本科/硕士/博士/期刊的硬线各不相同。所以**硬线必须由使用者显式给出**；
-    不给就**报错并说明去哪查**（S-02 §2.2：查所在学校的规范原文），**不许猜**。
+    因为**每个产出的约定来源各不相同**（学位论文规范 / 期刊投稿指南 / 基金要求 /
+    或者——**没有外部规范、由你自己承诺**）。所以**硬线必须由使用者显式给出**，
+    不给就报错，**不许猜**：猜一个数比报错更坏，报错会让人去查，猜数会让人直接用。
+
+    `capacity_source`（可选）：记下**这个数是哪来的**（外部规范名 / 期刊名 / "自定义"）。
+    写进去之后，`audit` 报的是「你承诺 40 条、实际 31 条」，而不是"你违抗了谁的规定"。
     """
     root = Path(root)
     problems: List[str] = []
     if refs_min is None:
         problems.append(
-            "缺 `--refs-min`：参考文献硬线**必须查你所在学校的规范原文**，本工具不替你猜"
-            "（S-02 §2.2）。例：南理工硕士 ≥40、博士 ≥80。"
+            "缺 `--refs-min`：参考文献条数**必须由你显式给出**，本工具不替你猜（S-02 §2.2）。"
+            "它来自哪里由你决定 —— 外部规范（学位论文规范 / 期刊投稿指南 / 基金要求），"
+            "**或者没有外部规范时由你自己承诺一个数**。建议同时用 `--source` 把出处记下来。"
         )
     if now_year is None:
         problems.append(
@@ -1431,6 +1441,10 @@ def plan_course(
     cap["refs_min"] = int(refs_min)
     cap["now_year"] = int(now_year)
     cap["recent_years"] = int(recent_years)
+    if capacity_source is not None:
+        cap["source"] = str(capacity_source)
+    if refs_style is not None:
+        config["refs_style"] = str(refs_style)
     if recent_ratio is not None:
         cap["recent_ratio_min"] = float(recent_ratio)
     if foreign_ratio is not None:
@@ -1469,6 +1483,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
         recent_ratio=args.recent_ratio,
         foreign_ratio=args.foreign_ratio,
         sources=[s for s in (args.sources or "").split(",") if s] or None,
+        capacity_source=args.source,
+        refs_style=args.refs_style,
         dry_run=args.dry_run,
     )
     if args.json:
@@ -1482,6 +1498,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
             return 2
         for k, v in res["config"]["capacity"].items():
             print(f"    capacity.{k} = {v}")
+        src = res["config"]["capacity"].get("source")
+        print(f"    容量出处：「{src}」" if src else
+              "  ! 没写 `--source`：**建议记下这个数的出处**（外部规范名 / 「自定义」），"
+              "否则以后没人知道为什么是 40 条（S-02 §1.3）")
+        if res["config"].get("refs_style"):
+            print(f"    refs_style = {res['config']['refs_style']}")
         if res["missing_ratio"]:
             print(f"  ! 还没设比例的阈值：{'、'.join(res['missing_ratio'])}（S-02 §3）")
         print("  已写入 lit.config.json" if res["written"] else "  （--dry-run，未写入）")
@@ -2051,6 +2073,15 @@ def render_refs_md(res: Dict[str, Any]) -> str:
 
 def cmd_refs(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
+    # ★ 通用化：著录风格可配（`lit.config.json` 的 `refs_style`，默认 `gb7714`）。
+    #   **本工具只实现了 gb7714** —— 选了别的就**明确说"我没做"**，而不是悄悄按国标输出
+    #   （S-05 §3 已声明不校验国标标点；把它伪装成通用格式器更坏）。
+    style = str(load_config(root).get("refs_style") or "gb7714").lower()
+    if style not in ("gb7714", "gbt7714", "gb/t7714", "gb7714-2015"):
+        print(f"X 你的 lit.config.json 指定 `refs_style = \"{style}\"`，但本工具**只实现了 gb7714**。")
+        print("  它**不会**假装支持——按你的风格自行著录，或用 `--order`/`--json` 取结构化数据后另做渲染。")
+        print("  （改回 gb7714 只需删掉 config 里的 refs_style，或写成 \"gb7714\"）")
+        return 2
     scan = Path(args.scan).resolve() if args.scan else None
     res = build_refs(root, order=args.order, scan=scan)
     if args.json:
@@ -2144,12 +2175,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     pl = sub.add_parser("plan", help="生成 lit.config.json（容量与比例；**硬线必须显式给出**）")
     pl.add_argument("dir", help="课题目录")
-    pl.add_argument("--refs-min", type=int, default=None, help="参考文献硬线（必填，不替你猜）")
+    pl.add_argument("--refs-min", type=int, default=None,
+                    help="参考文献条数（**必填**：来自外部规范，或你自己承诺）")
     pl.add_argument("--now-year", type=int, default=None, help="\"今年\"（必填，不许用系统时间）")
     pl.add_argument("--recent-years", type=int, default=5, help="近 N 年（默认 5）")
     pl.add_argument("--recent-ratio", type=float, default=None, help="近 N 年最低占比（如 0.3333）")
     pl.add_argument("--foreign-ratio", type=float, default=None, help="外文最低占比（如 0.3333）")
     pl.add_argument("--sources", default="", help="来源名单，逗号分隔（默认 ieee,wanfang）")
+    pl.add_argument("--source", default=None,
+                    help="容量出处：外部规范名 / 期刊指南 / 「自定义」（建议写，S-02 §1.3）")
+    pl.add_argument("--refs-style", default=None,
+                    help="著录风格：gb7714（默认）/ ieee / apa / 其它（非 gb7714 时 lit refs 会明确拒做）")
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--dry-run", action="store_true")
     pl.set_defaults(func=cmd_plan)
