@@ -1,0 +1,5 @@
+# 运行时与测试产物
+__pycache__/
+*.pyc
+.pytest_cache/
+.tmp-test*/
